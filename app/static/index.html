@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CRO Review Analyzer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="bg-glow"></div>
+
+  <div id="app">
+
+    <!-- ── HEADER ──────────────────────────────────────────────────────── -->
+    <header class="header">
+      <div class="header-inner">
+        <div class="logo">
+          <div class="logo-mark">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <path d="M9 1L11.12 6.26L17 6.73L12.75 10.39L14.09 16.13L9 13.1L3.91 16.13L5.25 10.39L1 6.73L6.88 6.26L9 1Z" fill="currentColor"/>
+            </svg>
+          </div>
+          <span class="logo-text">CRO Review Analyzer</span>
+        </div>
+        <button id="new-analysis-btn" class="btn btn-ghost hidden">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M8.5 1.5L3 7L8.5 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          New Analysis
+        </button>
+      </div>
+    </header>
+
+    <!-- ── IDLE: URL INPUT ─────────────────────────────────────────────── -->
+    <section id="view-idle" class="view view-idle">
+      <div class="hero">
+        <div class="hero-eyebrow">Powered by Claude AI</div>
+        <h1 class="hero-title">Trustpilot<br/>Review Mining</h1>
+        <p class="hero-sub">
+          Deep sentiment analysis &amp; CRO audit from any Trustpilot brand page.
+          Uncover friction points, themes, and opportunities in minutes.
+        </p>
+
+        <div class="input-card">
+          <label for="url-input" class="input-label">Trustpilot Brand URL</label>
+          <div class="input-row">
+            <div class="input-wrap">
+              <svg class="input-icon" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zM6.5 8a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0z" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.5V6M8 10v1.5M4.5 8H6M10 8h1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+              <input
+                id="url-input"
+                type="url"
+                class="url-input"
+                placeholder="https://www.trustpilot.com/review/brand.com"
+              />
+            </div>
+            <button id="analyze-btn" class="btn btn-primary">
+              Analyze
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M8 3l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+          <p class="input-hint">
+            Example: <code>https://www.trustpilot.com/review/shopify.com</code>
+          </p>
+          <p id="url-error" class="error-text hidden"></p>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-item"><span class="feature-dot"></span>Sentiment classification</div>
+          <div class="feature-item"><span class="feature-dot"></span>NPS estimation</div>
+          <div class="feature-item"><span class="feature-dot"></span>Friction points</div>
+          <div class="feature-item"><span class="feature-dot"></span>CRO opportunities</div>
+        </div>
+
+        <!-- Previous analyses -->
+        <div id="history-section" class="history-section hidden">
+          <h3 class="history-title">Recent Analyses</h3>
+          <div id="history-list" class="history-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── PROGRESS ────────────────────────────────────────────────────── -->
+    <section id="view-progress" class="view hidden">
+      <div class="progress-card">
+        <div class="progress-orbital">
+          <div class="orbital-ring"></div>
+          <div class="orbital-ring ring-2"></div>
+          <div class="orbital-dot"></div>
+        </div>
+
+        <h2 id="progress-title" class="progress-title">Starting…</h2>
+        <p id="progress-message" class="progress-message"></p>
+
+        <!-- Step indicators -->
+        <div class="steps">
+          <div class="step" id="step-scraping">
+            <div class="step-num">1</div>
+            <div class="step-label">Scraping</div>
+          </div>
+          <div class="step-line"></div>
+          <div class="step" id="step-analyzing">
+            <div class="step-num">2</div>
+            <div class="step-label">Analyzing</div>
+          </div>
+          <div class="step-line"></div>
+          <div class="step" id="step-building">
+            <div class="step-num">3</div>
+            <div class="step-label">Report</div>
+          </div>
+        </div>
+
+        <div class="progress-bar-wrap">
+          <div id="progress-bar" class="progress-bar"></div>
+        </div>
+
+        <div class="progress-stats">
+          <div class="stat">
+            <span class="stat-val" id="stat-pages">0</span>
+            <span class="stat-label">Pages scraped</span>
+          </div>
+          <div class="stat">
+            <span class="stat-val" id="stat-reviews">0</span>
+            <span class="stat-label">Reviews found</span>
+          </div>
+          <div class="stat">
+            <span class="stat-val" id="stat-analyzed">0</span>
+            <span class="stat-label">Analyzed</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── ERROR ──────────────────────────────────────────────────────── -->
+    <section id="view-error" class="view hidden">
+      <div class="error-card">
+        <div class="error-icon">
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="1.5"/><path d="M16 9v8M16 21v2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </div>
+        <h2 class="error-title">Something went wrong</h2>
+        <p id="error-detail" class="error-detail"></p>
+        <button id="retry-btn" class="btn btn-primary">Try Again</button>
+      </div>
+    </section>
+
+    <!-- ── RESULTS DASHBOARD ───────────────────────────────────────────── -->
+    <section id="view-results" class="view hidden">
+      <div class="dashboard">
+
+        <!-- Dashboard header -->
+        <div class="dashboard-header">
+          <div class="dash-brand">
+            <div class="dash-brand-icon">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1L9.85 5.49L15 5.91L11.25 9.14L12.45 14.09L8 11.5L3.55 14.09L4.75 9.14L1 5.91L6.15 5.49L8 1Z" fill="currentColor"/></svg>
+            </div>
+            <div>
+              <h2 id="dash-company" class="dash-company"></h2>
+              <a id="dash-url" class="dash-url" target="_blank" rel="noopener"></a>
+            </div>
+          </div>
+          <button id="export-btn" class="btn btn-outline">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1v8M4 6l3 3 3-3M2 10v2a1 1 0 001 1h8a1 1 0 001-1v-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Export JSON
+          </button>
+        </div>
+
+        <!-- Trustpilot cap warning banner -->
+        <div id="cap-banner" class="cap-banner hidden"></div>
+
+        <!-- Summary metrics -->
+        <div class="metrics-row">
+          <div class="metric-card">
+            <div class="metric-icon">📊</div>
+            <div class="metric-val" id="met-total"></div>
+            <div class="metric-label">Total Reviews</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon">⭐</div>
+            <div class="metric-val star-val" id="met-rating"></div>
+            <div class="metric-label">Avg Rating</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon">↑</div>
+            <div class="metric-val positive" id="met-positive"></div>
+            <div class="metric-label">Positive</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon">↓</div>
+            <div class="metric-val negative" id="met-negative"></div>
+            <div class="metric-label">Negative</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon">📈</div>
+            <div class="metric-val" id="met-nps"></div>
+            <div class="metric-label">NPS Score</div>
+          </div>
+        </div>
+
+        <!-- Sentiment distribution -->
+        <div class="card">
+          <h3 class="card-title">Sentiment Distribution</h3>
+          <div class="sentiment-bar-wrap">
+            <div id="sent-positive" class="sent-seg sent-pos" title="Positive"></div>
+            <div id="sent-neutral"  class="sent-seg sent-neu" title="Neutral"></div>
+            <div id="sent-negative" class="sent-seg sent-neg" title="Negative"></div>
+          </div>
+          <div class="sentiment-legend">
+            <div class="legend-item">
+              <span class="legend-dot pos"></span>
+              <span>Positive</span>
+              <span class="legend-pct" id="sent-pos-label"></span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-dot neu"></span>
+              <span>Neutral</span>
+              <span class="legend-pct" id="sent-neu-label"></span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-dot neg"></span>
+              <span>Negative</span>
+              <span class="legend-pct" id="sent-neg-label"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ★ Rating Distribution (NEW) -->
+        <div class="card" id="rating-dist">
+          <h3 class="card-title">Rating Distribution</h3>
+          <div id="rating-dist-bars" class="rating-bars"></div>
+        </div>
+
+        <!-- NPS breakdown -->
+        <div class="card">
+          <h3 class="card-title">NPS Estimate</h3>
+          <div class="nps-row">
+            <div class="nps-seg promoters">
+              <div class="nps-pct" id="nps-promoters"></div>
+              <div class="nps-label">Promoters <span class="nps-range">(9–10)</span></div>
+            </div>
+            <div class="nps-seg passives">
+              <div class="nps-pct" id="nps-passives"></div>
+              <div class="nps-label">Passives <span class="nps-range">(7–8)</span></div>
+            </div>
+            <div class="nps-seg detractors">
+              <div class="nps-pct" id="nps-detractors"></div>
+              <div class="nps-label">Detractors <span class="nps-range">(0–6)</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Two-column insights -->
+        <div class="two-col">
+          <div class="card">
+            <h3 class="card-title">Top Themes</h3>
+            <ul id="themes-list" class="pill-list"></ul>
+          </div>
+          <div class="card">
+            <h3 class="card-title">Friction Points</h3>
+            <ul id="friction-list" class="insight-list"></ul>
+          </div>
+        </div>
+
+        <!-- Improvement opportunities -->
+        <div class="card">
+          <h3 class="card-title">Improvement Opportunities</h3>
+          <ul id="improvements-list" class="insight-list improvements"></ul>
+        </div>
+
+        <!-- High-priority issues -->
+        <div id="issues-card" class="card hidden">
+          <h3 class="card-title">
+            <span class="card-title-badge danger">High-Priority Issues</span>
+          </h3>
+          <div id="issues-list" class="issues-grid"></div>
+        </div>
+
+        <!-- Individual reviews -->
+        <div class="card">
+          <div class="reviews-header">
+            <h3 class="card-title" style="margin-bottom:0">Individual Reviews</h3>
+            <div class="review-filters">
+              <button class="filter-btn active" data-filter="all">All</button>
+              <button class="filter-btn" data-filter="positive">Positive</button>
+              <button class="filter-btn" data-filter="neutral">Neutral</button>
+              <button class="filter-btn" data-filter="negative">Negative</button>
+            </div>
+          </div>
+          <div id="reviews-container" class="reviews-container"></div>
+        </div>
+
+      </div>
+    </section>
+
+  </div><!-- #app -->
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
