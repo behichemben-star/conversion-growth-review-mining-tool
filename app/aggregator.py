@@ -2,6 +2,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime
 
+from typing import Optional
 from app.models import (
     RawReview,
     ReviewAnalysis,
@@ -12,6 +13,7 @@ from app.models import (
     ThemeCount,
     FrictionCount,
     IssueCategory,
+    BrandSynthesis,
 )
 
 
@@ -23,6 +25,7 @@ def aggregate_report(
     scraped_at: datetime,
     analyzed_at: datetime,
     trustpilot_total_reviews: int = 0,
+    synthesis: Optional[BrandSynthesis] = None,
 ) -> FullReport:
     total = len(reviews)
 
@@ -46,7 +49,7 @@ def aggregate_report(
         analyzed_at=analyzed_at,
     )
 
-    return FullReport(summary=summary, reviews=reviews, analyses=analyses)
+    return FullReport(summary=summary, reviews=reviews, analyses=analyses, synthesis=synthesis)
 
 
 # ---------------------------------------------------------------------------

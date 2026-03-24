@@ -108,10 +108,24 @@ class ReportSummary(BaseModel):
     analyzed_at: datetime
 
 
+class BrandInsight(BaseModel):
+    title: str           # short label e.g. "Difficult refund process"
+    description: str     # 1-2 sentence explanation
+    mentions: int        # approx number of reviews mentioning this
+
+
+class BrandSynthesis(BaseModel):
+    top_themes: list[BrandInsight]               # what customers talk about most
+    friction_points: list[BrandInsight]          # specific complaints / blockers
+    improvement_opportunities: list[BrandInsight]  # actionable fixes
+    key_insights: list[str]                      # 3 high-level CRO observations
+
+
 class FullReport(BaseModel):
     summary: ReportSummary
     reviews: list[RawReview]
     analyses: list[ReviewAnalysis]
+    synthesis: Optional[BrandSynthesis] = None
 
 
 # ---------------------------------------------------------------------------

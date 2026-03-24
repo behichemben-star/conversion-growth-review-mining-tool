@@ -254,23 +254,65 @@ class App {
     document.getElementById('nps-passives').textContent   = nps.passives_pct.toFixed(1)  + '%';
     document.getElementById('nps-detractors').textContent = nps.detractors_pct.toFixed(1) + '%';
 
-    // Themes
+    // ── Synthesis-powered insights (holistic Claude analysis) ───────────
+    const syn = this.report.synthesis || {};
+
+    // Themes — from synthesis if available, fallback to per-review aggregation
     const themesList = document.getElementById('themes-list');
-    themesList.innerHTML = (summary.top_themes || []).map(t =>
-      `<li><span class="pill">${_esc(t.theme)}<span class="pill-count">${t.count}</span></span></li>`
-    ).join('');
+    const synThemes  = syn.top_themes || [];
+    if (synThemes.length) {
+      themesList.innerHTML = synThemes.map(t =>
+        `<li class="insight-item synthesis-item">
+          <div class="insight-title">${_esc(t.title)}<span class="pill-count">${t.mentions} mentions</span></div>
+          <div class="insight-desc">${_esc(t.description)}</div>
+        </li>`
+      ).join('');
+    } else {
+      themesList.innerHTML = (summary.top_themes || []).map(t =>
+        `<li><span class="pill">${_esc(t.theme)}<span class="pill-count">${t.count}</span></span></li>`
+      ).join('') || '<li class="insight-item" style="color:var(--text-muted)">None detected</li>';
+    }
 
-    // Friction
+    // Friction — from synthesis
     const frictionList = document.getElementById('friction-list');
-    frictionList.innerHTML = (summary.top_friction_points || []).map(f =>
-      `<li class="insight-item"><span class="friction-count">${f.count}×</span>${_esc(f.friction)}</li>`
-    ).join('') || '<li class="insight-item" style="color:var(--text-muted)">None detected</li>';
+    const synFriction  = syn.friction_points || [];
+    if (synFriction.length) {
+      frictionList.innerHTML = synFriction.map(f =>
+        `<li class="insight-item synthesis-item">
+          <div class="insight-title">${_esc(f.title)}<span class="friction-count">${f.mentions}×</span></div>
+          <div class="insight-desc">${_esc(f.description)}</div>
+        </li>`
+      ).join('');
+    } else {
+      frictionList.innerHTML = (summary.top_friction_points || []).map(f =>
+        `<li class="insight-item"><span class="friction-count">${f.count}×</span>${_esc(f.friction)}</li>`
+      ).join('') || '<li class="insight-item" style="color:var(--text-muted)">None detected</li>';
+    }
 
-    // Improvements
-    const impList = document.getElementById('improvements-list');
-    impList.innerHTML = (summary.top_improvement_opportunities || []).map(i =>
-      `<li class="insight-item">${_esc(i)}</li>`
-    ).join('') || '<li class="insight-item" style="color:var(--text-muted)">None detected</li>';
+    // Improvements — from synthesis
+    const impList    = document.getElementById('improvements-list');
+    const synImprovs = syn.improvement_opportunities || [];
+    if (synImprovs.length) {
+      impList.innerHTML = synImprovs.map(i =>
+        `<li class="insight-item synthesis-item">
+          <div class="insight-title">${_esc(i.title)}<span class="pill-count">${i.mentions}×</span></div>
+          <div class="insight-desc">${_esc(i.description)}</div>
+        </li>`
+      ).join('');
+    } else {
+      impList.innerHTML = (summary.top_improvement_opportunities || []).map(i =>
+        `<li class="insight-item">${_esc(i)}</li>`
+      ).join('') || '<li class="insight-item" style="color:var(--text-muted)">None detected</li>';
+    }
+
+    // Key insights banner (new section)
+    const keyInsightsEl = document.getElementById('key-insights-list');
+    if (keyInsightsEl) {
+      const ki = (syn.key_insights || []);
+      keyInsightsEl.innerHTML = ki.length
+        ? ki.map(i => `<li class="insight-item key-insight">💡 ${_esc(i)}</li>`).join('')
+        : '<li class="insight-item" style="color:var(--text-muted)">Run analysis to see insights</li>';
+    }
 
     // High-priority issues
     if (summary.high_priority_issue_count > 0) {

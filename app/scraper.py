@@ -25,10 +25,6 @@ MAX_PAGES             = 500    # hard safety cap for authenticated scraping
 
 SORT_ORDERS = ["recency", "ratingHigh", "ratingLow"]
 
-# Credentials loaded from .env (via python-dotenv in main.py startup)
-TRUSTPILOT_EMAIL    = os.getenv("TRUSTPILOT_EMAIL", "")
-TRUSTPILOT_PASSWORD = os.getenv("TRUSTPILOT_PASSWORD", "")
-
 
 class ScraperError(Exception):
     pass
@@ -86,23 +82,25 @@ async def scrape_trustpilot(
         except Exception:
             pass
 
-    # ── Authenticated path: full scrape with no page cap ─────────────────────
-    if TRUSTPILOT_EMAIL and TRUSTPILOT_PASSWORD:
-        await progress_callback("Launching authenticated browser…", 0, 0)
-        logger.info(
-            "Authenticated mode — will scrape all pages for %s", company_slug
-        )
-        reviews, trustpilot_total = await asyncio.to_thread(
-            _playwright_authenticated_scrape,
-            url, company_slug, sync_cb,
+    # ── Authenticated path: cookie-based, no page cap ───────────────────────
+    # Trustpilot uses passwordless OTP login — we use session cookies extracted
+    # from a manually-logged-in browser session instead of automating the login.
+    # Set TRUSTPILOT_COOKIE in .env with the full Cookie header value from DevTools.
+    _cookie = os.getenv("TRUSTPILOT_COOKIE", "").strip()
+    logger.info("Cookie auth present: %s", bool(_cookie))
+    if _cookie:
+        await progress_callback("Authenticated mode — fetching all pages…", 0, 0)
+        logger.info("Cookie auth mode — scraping all pages for %s", company_slug)
+        reviews, trustpilot_total = await _collect_all_authenticated(
+            url, company_slug, _cookie, progress_callback
         )
         if reviews:
             logger.info(
-                "Authenticated scrape: %d reviews (Trustpilot total: %d)",
+                "Cookie-auth scrape: %d reviews (Trustpilot total: %d)",
                 len(reviews), trustpilot_total,
             )
             return reviews, trustpilot_total
-        logger.warning("Authenticated scrape returned 0 reviews — falling back to anonymous")
+        logger.warning("Cookie-auth returned 0 reviews — cookies may be expired. Falling back to anonymous.")
 
     # ── Anonymous path: httpx page 1 + multi-sort up to page 10 ─────────────
     await progress_callback("Fetching Trustpilot page…", 0, 0)
@@ -298,18 +296,178 @@ async def _fetch_api_page(
     return reviews or None
 
 
+# ── Cookie-authenticated full scraper ────────────────────────────────────────
+
+async def _collect_all_authenticated(
+    url: str,
+    company_slug: str,
+    cookie: str,
+    progress_callback: Callable[[str, int, int], Awaitable[None]],
+) -> tuple[list[RawReview], int]:
+    """
+    Scrape ALL pages using session cookies from a logged-in Trustpilot browser.
+    Cookies bypass the anonymous 10-page limit — server returns real reviews.
+    Returns (all_reviews, trustpilot_total_reviews).
+    """
+    authed_headers = {
+        **_HTML_HEADERS,
+        "Cookie": cookie,
+        "Accept": "application/json",
+        "x-nextjs-data": "1",
+    }
+
+    all_reviews:     list[RawReview] = []
+    trustpilot_total = 0
+    build_id         = ""
+    total_pages      = 0
+
+    async with httpx.AsyncClient(
+        headers=authed_headers, timeout=HTTP_TIMEOUT, follow_redirects=False
+    ) as client:
+
+        # ── Page 1: HTML to get buildId + metadata ───────────────────────────
+        html_headers = {**_HTML_HEADERS, "Cookie": cookie}
+        async with httpx.AsyncClient(
+            headers=html_headers, timeout=HTTP_TIMEOUT, follow_redirects=True
+        ) as html_client:
+            resp = await html_client.get(url)
+
+        if resp.status_code != 200:
+            logger.error("Cookie-auth: page 1 returned HTTP %d — cookies may be invalid", resp.status_code)
+            return [], 0
+
+        match = re.search(
+            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+            resp.text, re.DOTALL,
+        )
+        if not match:
+            logger.error("Cookie-auth: no __NEXT_DATA__ on page 1")
+            return [], 0
+
+        first_data       = json.loads(match.group(1))
+        page_props       = _get_page_props(first_data)
+        pagination       = page_props.get("pagination", {}) or {}
+        build_id         = first_data.get("buildId", "")
+        total_pages      = _read_total_pages(pagination)
+        trustpilot_total = _read_total_review_count(page_props, total_pages)
+        cap              = total_pages if total_pages else MAX_PAGES
+
+        logger.info(
+            "Cookie-auth: totalPages=%s trustpilot_total=%d cap=%d buildId=%.20s…",
+            total_pages or "unknown", trustpilot_total, cap, build_id,
+        )
+
+        p1 = _parse_reviews_from_api_response(first_data)
+        all_reviews.extend(p1)
+        await progress_callback(f"Page 1/{cap} — {len(all_reviews)} reviews", 1, len(all_reviews))
+
+        # ── Pages 2-N via _next/data JSON API ────────────────────────────────
+        consec_fail = 0
+
+        for page_num in range(2, cap + 1):
+            api_url = _build_api_url(company_slug, build_id, page_num)
+            try:
+                resp = await client.get(api_url)
+
+                # Redirect to login = cookies expired
+                if resp.status_code in (301, 302, 307, 308):
+                    location = resp.headers.get("location", "")
+                    logger.warning(
+                        "Cookie-auth: page %d redirected to %s — session expired",
+                        page_num, location,
+                    )
+                    break
+
+                if resp.status_code != 200:
+                    logger.warning("Cookie-auth: page %d HTTP %d", page_num, resp.status_code)
+                    consec_fail += 1
+                    if consec_fail >= MAX_CONSECUTIVE_FAIL:
+                        break
+                    await asyncio.sleep(1)
+                    continue
+
+                data         = resp.json()
+                page_reviews = _parse_reviews_from_api_response(data)
+
+                if not page_reviews:
+                    # Try refreshing buildId via HTML if API returns empty
+                    if page_num <= 12:
+                        html_url = f"https://www.trustpilot.com/review/{company_slug}?page={page_num}"
+                        async with httpx.AsyncClient(
+                            headers={**_HTML_HEADERS, "Cookie": cookie},
+                            timeout=HTTP_TIMEOUT,
+                            follow_redirects=False,
+                        ) as hc:
+                            hr = await hc.get(html_url)
+                        if hr.status_code == 200:
+                            hm = re.search(
+                                r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+                                hr.text, re.DOTALL,
+                            )
+                            if hm:
+                                hd       = json.loads(hm.group(1))
+                                new_bid  = hd.get("buildId", "")
+                                if new_bid and new_bid != build_id:
+                                    logger.info("Cookie-auth: refreshed buildId at page %d", page_num)
+                                    build_id = new_bid
+                                page_reviews = _parse_reviews_from_api_response(hd)
+                        elif hr.status_code in (301, 302, 307, 308):
+                            logger.warning(
+                                "Cookie-auth: HTML page %d redirected — session expired", page_num
+                            )
+                            break
+
+                if not page_reviews:
+                    consec_fail += 1
+                    logger.warning(
+                        "Cookie-auth: page %d empty (%d consecutive)", page_num, consec_fail
+                    )
+                    if consec_fail >= MAX_CONSECUTIVE_FAIL:
+                        logger.info("Cookie-auth: stopping at page %d", page_num)
+                        break
+                    await asyncio.sleep(2)
+                    continue
+
+                consec_fail = 0
+                all_reviews.extend(page_reviews)
+                await progress_callback(
+                    f"Page {page_num}/{cap} — {len(all_reviews)} reviews",
+                    page_num, len(all_reviews),
+                )
+
+                if len(page_reviews) < 20:
+                    break  # last partial page
+
+                await asyncio.sleep(DELAY_BETWEEN_PAGES)
+
+            except Exception as exc:
+                logger.warning("Cookie-auth: page %d exception: %s", page_num, exc)
+                consec_fail += 1
+                if consec_fail >= MAX_CONSECUTIVE_FAIL:
+                    break
+                await asyncio.sleep(2)
+
+    logger.info("Cookie-auth complete: %d reviews scraped", len(all_reviews))
+    return all_reviews, trustpilot_total
+
+
 # ── Playwright (picks up from any page, runs remaining pages) ────────────────
 
 def _playwright_authenticated_scrape(
     url: str,
     company_slug: str,
+    email: str,
+    password: str,
     progress_callback: Callable[[str, int, int], None],
 ) -> tuple[list[RawReview], int]:
     """
-    Log into Trustpilot with stored credentials, then scrape ALL pages with no cap.
+    Log into Trustpilot then scrape ALL pages with no cap.
+    Uses full page.goto() navigation for every page — guarantees auth cookies
+    are sent even when context.request fails beyond page 10.
     Returns (reviews, trustpilot_total_reviews).
     """
-    all_reviews: list[RawReview] = []
+    all_reviews:     list[RawReview] = []
+    trustpilot_total = 0
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
@@ -333,122 +491,150 @@ def _playwright_authenticated_scrape(
         try:
             page = context.new_page()
 
-            # ── Step 1: Log in ───────────────────────────────────────────────
-            progress_callback("Browser: navigating to Trustpilot login…", 0, 0)
+            # ── Step 1: Login ────────────────────────────────────────────────
+            progress_callback("Logging into Trustpilot…", 0, 0)
+            logger.info("Auth: navigating to login page")
+
             page.goto(
                 "https://www.trustpilot.com/login",
                 wait_until="domcontentloaded",
                 timeout=PAGE_TIMEOUT,
             )
 
-            # Handle Cloudflare challenge if present
-            for _ in range(6):
-                title = page.title().lower()
-                if "just a moment" in title or "cloudflare" in title:
-                    progress_callback("Browser: solving Cloudflare challenge…", 0, 0)
-                    page.wait_for_timeout(5000)
+            # Wait out Cloudflare
+            for _ in range(8):
+                t = page.title().lower()
+                if "just a moment" in t or "cloudflare" in t:
+                    page.wait_for_timeout(4000)
                 else:
                     break
 
-            # Fill login form
+            logger.info("Auth: login page loaded — title: %s | url: %s", page.title(), page.url)
+
+            # Trustpilot uses a two-step flow: email first, then password
+            # Try email field
+            email_sel = 'input[name="email"], input[type="email"], input[id*="email"], input[placeholder*="email" i]'
             try:
-                page.wait_for_selector('input[name="email"]', timeout=PAGE_TIMEOUT)
-                page.fill('input[name="email"]', TRUSTPILOT_EMAIL)
-                page.fill('input[name="password"]', TRUSTPILOT_PASSWORD)
+                page.wait_for_selector(email_sel, timeout=15_000)
+                page.fill(email_sel, email)
+                logger.info("Auth: filled email field")
+                # Click continue/next if it's a two-step form
+                next_btn = 'button[type="submit"], button[data-testid*="continue"], button[data-testid*="next"]'
+                page.click(next_btn)
+                page.wait_for_timeout(2000)
+                logger.info("Auth: after email submit — url: %s", page.url)
+            except Exception as e:
+                logger.error("Auth: could not find email field: %s", e)
+                return [], 0
+
+            # Fill password (may appear after email submit in two-step flow)
+            pwd_sel = 'input[name="password"], input[type="password"]'
+            try:
+                page.wait_for_selector(pwd_sel, timeout=15_000)
+                page.fill(pwd_sel, password)
+                logger.info("Auth: filled password field")
                 page.click('button[type="submit"]')
                 page.wait_for_load_state("domcontentloaded", timeout=PAGE_TIMEOUT)
-                page.wait_for_timeout(2000)
-            except Exception as exc:
-                logger.warning("Login form interaction failed: %s", exc)
-                # Try alternative selectors
-                try:
-                    page.wait_for_selector('input[type="email"]', timeout=10_000)
-                    page.fill('input[type="email"]', TRUSTPILOT_EMAIL)
-                    page.fill('input[type="password"]', TRUSTPILOT_PASSWORD)
-                    page.keyboard.press("Enter")
-                    page.wait_for_load_state("domcontentloaded", timeout=PAGE_TIMEOUT)
-                    page.wait_for_timeout(2000)
-                except Exception as exc2:
-                    logger.error("Login failed entirely: %s", exc2)
-                    context.close()
-                    browser.close()
-                    return [], 0
+                page.wait_for_timeout(3000)
+                logger.info("Auth: after password submit — url: %s | title: %s", page.url, page.title())
+            except Exception as e:
+                logger.error("Auth: could not fill password: %s", e)
+                return [], 0
 
-            # Verify login succeeded by checking for user menu / absence of login button
-            current_url = page.url
-            if "login" in current_url or "connect" in current_url:
-                logger.error(
-                    "Login may have failed — still on auth page: %s", current_url
-                )
-                # Continue anyway — sometimes it redirects back to review page
+            # Verify login
+            post_login_url = page.url
+            if any(x in post_login_url for x in ["/login", "/identify", "/connect", "auth."]):
+                logger.error("Auth: login failed — still on auth page: %s", post_login_url)
+                logger.error("Auth: page title was: %s", page.title())
+                return [], 0
 
-            logger.info("Login completed — current URL: %s", page.url)
-            progress_callback("Browser: logged in — loading reviews page…", 0, 0)
+            logger.info("Auth: login SUCCESS — url: %s", post_login_url)
+            progress_callback("Logged in — loading reviews…", 0, 0)
 
-            # ── Step 2: Load the review page (page 1) ───────────────────────
+            # ── Step 2: Page 1 via browser navigation ────────────────────────
             page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(1500)
 
             try:
-                page.wait_for_selector(
-                    "script#__NEXT_DATA__", state="attached", timeout=PAGE_TIMEOUT
-                )
+                page.wait_for_selector("script#__NEXT_DATA__", state="attached", timeout=PAGE_TIMEOUT)
             except Exception:
-                raise ScraperError(
-                    f"Could not load review page after login (title: '{page.title()}')"
-                )
+                raise ScraperError(f"Could not load review page (title: '{page.title()}')")
 
-            raw_nd    = page.eval_on_selector("script#__NEXT_DATA__", "el => el.textContent")
-            next_data = json.loads(raw_nd)
+            next_data  = json.loads(page.eval_on_selector("script#__NEXT_DATA__", "el => el.textContent"))
             page_props = _get_page_props(next_data)
             build_id   = next_data.get("buildId", "")
             pagination = page_props.get("pagination", {}) or {}
-            total_pages = _read_total_pages(pagination)
+            total_pages      = _read_total_pages(pagination)
             trustpilot_total = _read_total_review_count(page_props, total_pages)
+            cap = total_pages if total_pages else MAX_PAGES
 
             logger.info(
-                "Auth scrape: totalPages=%s trustpilot_total=%d buildId=%.20s…",
-                total_pages or "unknown", trustpilot_total, build_id,
+                "Auth: totalPages=%s trustpilot_total=%d cap=%d",
+                total_pages or "unknown", trustpilot_total, cap,
             )
 
-            # Page 1 reviews
             p1 = _parse_reviews_from_api_response(next_data)
             all_reviews.extend(p1)
-            progress_callback(
-                f"Page 1 — {len(all_reviews)} reviews scraped", 1, len(all_reviews)
-            )
+            progress_callback(f"Page 1/{cap} — {len(all_reviews)} reviews", 1, len(all_reviews))
 
-            # ── Step 3: Fetch all remaining pages via context.request ────────
-            referer    = url
-            cap        = total_pages if total_pages else MAX_PAGES
+            # ── Step 3: All remaining pages — context.request first, ─────────
+            #           full page.goto() fallback if empty (pages 11+)
+            referer     = url
             consec_fail = 0
+            used_goto   = False   # track if we switched to full navigation
 
             for page_num in range(2, cap + 1):
-                page_reviews = _context_fetch_page(
-                    context, company_slug, build_id, page_num, referer
-                )
+                reviews_this_page: Optional[list[RawReview]] = None
 
-                if not page_reviews:
-                    consec_fail += 1
-                    logger.warning(
-                        "Auth: page %d no reviews (%d consecutive)", page_num, consec_fail
+                # Try fast context.request first
+                if not used_goto:
+                    reviews_this_page = _context_fetch_page(
+                        context, company_slug, build_id, page_num, referer
                     )
+                    if not reviews_this_page and page_num > 10:
+                        logger.info(
+                            "Auth: context.request empty at page %d — switching to full navigation",
+                            page_num,
+                        )
+                        used_goto = True
+
+                # Full page.goto() fallback (always works when authenticated)
+                if used_goto or not reviews_this_page:
+                    nav_url = (
+                        f"https://www.trustpilot.com/review/{company_slug}?page={page_num}"
+                    )
+                    try:
+                        page.goto(nav_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+                        page.wait_for_timeout(500)
+                        # Check we weren't redirected to login
+                        if any(x in page.url for x in ["/login", "/connect", "/identify"]):
+                            logger.warning("Auth: page %d redirected to login — session expired?", page_num)
+                            break
+                        raw = page.eval_on_selector("script#__NEXT_DATA__", "el => el.textContent")
+                        nd  = json.loads(raw)
+                        reviews_this_page = _parse_reviews_from_api_response(nd)
+                    except Exception as exc:
+                        logger.warning("Auth: page.goto page %d failed: %s", page_num, exc)
+                        reviews_this_page = None
+
+                if not reviews_this_page:
+                    consec_fail += 1
+                    logger.warning("Auth: page %d empty (%d consecutive)", page_num, consec_fail)
                     if consec_fail >= MAX_CONSECUTIVE_FAIL:
-                        logger.info("Auth: stopping at page %d", page_num)
+                        logger.info("Auth: stopping — %d consecutive empty pages", consec_fail)
                         break
-                    time.sleep(2)
+                    time.sleep(1)
                     continue
 
                 consec_fail = 0
-                all_reviews.extend(page_reviews)
+                all_reviews.extend(reviews_this_page)
                 progress_callback(
                     f"Page {page_num}/{cap} — {len(all_reviews)} reviews scraped",
-                    page_num,
-                    len(all_reviews),
+                    page_num, len(all_reviews),
                 )
 
-                if len(page_reviews) < 20:
-                    break   # last partial page
+                if len(reviews_this_page) < 20:
+                    break  # last partial page
 
                 time.sleep(DELAY_BETWEEN_PAGES)
 
@@ -456,6 +642,7 @@ def _playwright_authenticated_scrape(
             context.close()
             browser.close()
 
+    logger.info("Auth scrape complete: %d reviews", len(all_reviews))
     return all_reviews, trustpilot_total
 
 

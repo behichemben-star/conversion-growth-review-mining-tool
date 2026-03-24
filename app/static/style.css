@@ -875,6 +875,41 @@ body {
   margin-left: 8px;
 }
 
+/* ── Synthesis insight items ───────────────────────────────────────────── */
+.synthesis-item { border-left-color: var(--accent) !important; padding: 12px 14px; }
+.synthesis-item .insight-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.synthesis-item .insight-desc {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+.key-insights-card { border-color: rgba(34,211,238,.2); }
+.key-insight {
+  border-left-color: var(--accent) !important;
+  color: var(--text) !important;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.badge-ai {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  background: linear-gradient(90deg, var(--accent), #818cf8);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin-left: 8px;
+}
+
 /* ── Issues grid ───────────────────────────────────────────────────────── */
 .issues-grid { display: flex; flex-wrap: wrap; gap: 10px; }
 .issue-badge {

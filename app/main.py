@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.aggregator import aggregate_report
-from app.analyzer import analyze_reviews
+from app.analyzer import analyze_reviews, synthesize_brand_insights
 from app.job_store import job_store
 from app.models import (
     FullReport,
@@ -214,12 +214,19 @@ async def _run_analysis_pipeline(job_id: str) -> None:
         analyses = await analyze_reviews(reviews, analysis_progress)
         analyzed_at = datetime.now(timezone.utc)
 
-        # ── Phase 3: Aggregating ─────────────────────────────────────────
+        # ── Phase 3: Brand synthesis (holistic CRO insights) ─────────────
         await job_store.update_job(
             job_id,
             status=JobStatus.AGGREGATING,
-            progress_message="Building report…",
+            progress_message="Synthesizing themes and friction points…",
             reviews_analyzed=len(analyses),
+        )
+        synthesis = await synthesize_brand_insights(reviews, analyses)
+
+        # ── Phase 4: Aggregating ─────────────────────────────────────────
+        await job_store.update_job(
+            job_id,
+            progress_message="Building report…",
         )
 
         full_report = aggregate_report(
@@ -230,6 +237,7 @@ async def _run_analysis_pipeline(job_id: str) -> None:
             scraped_at=scraped_at,
             analyzed_at=analyzed_at,
             trustpilot_total_reviews=trustpilot_total_reviews,
+            synthesis=synthesis,
         )
 
         # ── Phase 4: Persist ─────────────────────────────────────────────

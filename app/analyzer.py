@@ -14,15 +14,16 @@ from app.models import (
     CustomerExperience,
     CROInsights,
     AuditFlags,
+    BrandInsight,
+    BrandSynthesis,
 )
 
 logger = logging.getLogger(__name__)
 
-BATCH_THRESHOLD = 50        # use batch API at or above this many reviews
-SEQUENTIAL_CHUNK = 5        # concurrent requests for sequential mode
-BATCH_POLL_INTERVAL = 5     # seconds between batch status polls
+CONCURRENCY      = 15   # parallel Claude requests (no batch API)
+DEEP_ANALYSIS_CAP = 150  # max reviews sent to Claude; rest use star-based defaults
 
-MODEL = "claude-3-5-haiku-20241022"   # confirmed valid model ID
+MODEL = "claude-haiku-4-5-20251001"
 
 SYSTEM_PROMPT = (
     "You are a CRO analyst specializing in customer sentiment analysis. "
@@ -143,131 +144,98 @@ async def analyze_reviews(
     progress_callback: Callable[[int, int], Awaitable[None]],
 ) -> list[ReviewAnalysis]:
     """
-    Route to batch (>=50) or sequential (<50) analysis.
-    Returns ReviewAnalysis list in the same order as input reviews.
+    Two-tier analysis strategy:
+
+    Tier 1 — Star-based classification (free, instant, applied to ALL reviews):
+        5★ → positive/0.9   4★ → positive/0.7
+        3★ → neutral/0.0
+        2★ → negative/-0.7  1★ → negative/-0.9
+
+    Tier 2 — Claude deep analysis (up to DEEP_ANALYSIS_CAP reviews):
+        Priority: all 1-2★ → all 3★ → random sample of 4-5★
+        Extracts: friction_points, improvement_opportunities, issue_category,
+                  themes, positives, negatives (used by synthesis)
+
+    Result: ALL reviews have sentiment. Up to 150 have deep Claude insights.
+    Synthesis then reads all review texts directly, so themes/friction are
+    always comprehensive regardless of which reviews got deep analysis.
     """
+    import random
+    random.seed(42)
+
     client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    if len(reviews) >= BATCH_THRESHOLD:
+    # ── Tier 1: instant star-based defaults for every review ─────────────────
+    base_map: dict[str, ReviewAnalysis] = {
+        r.id: _star_based_default(r) for r in reviews
+    }
+    await progress_callback(0, len(reviews))
+
+    # ── Tier 2: build smart sample for Claude deep analysis ──────────────────
+    low_star  = [r for r in reviews if r.rating <= 2]
+    mid_star  = [r for r in reviews if r.rating == 3]
+    high_star = [r for r in reviews if r.rating >= 4]
+
+    # Fill budget: low-star first (most CRO-relevant), then mid, then high
+    budget = DEEP_ANALYSIS_CAP
+    sample: list[RawReview] = []
+
+    take_low  = min(len(low_star),  int(budget * 0.50))   # up to 50%
+    take_mid  = min(len(mid_star),  int(budget * 0.25))   # up to 25%
+    take_high = min(len(high_star), budget - take_low - take_mid)  # remainder
+
+    sample.extend(random.sample(low_star,  take_low)  if take_low  < len(low_star)  else low_star)
+    sample.extend(random.sample(mid_star,  take_mid)  if take_mid  < len(mid_star)  else mid_star)
+    sample.extend(random.sample(high_star, take_high) if take_high < len(high_star) else high_star)
+
+    logger.info(
+        "Deep analysis sample: %d reviews (from %d total) — %d low★, %d mid★, %d high★",
+        len(sample), len(reviews), take_low, take_mid, take_high,
+    )
+
+    # ── Run Claude on the sample (concurrent, no batch API) ──────────────────
+    if sample:
         try:
-            return await _analyze_batch(reviews, client, progress_callback)
+            deep_results = await _analyze_concurrent(sample, client, progress_callback, len(reviews))
+            for analysis in deep_results:
+                base_map[analysis.review_id] = analysis
         except Exception as exc:
-            logger.warning(
-                "Batch API failed (%s), falling back to sequential mode", exc
-            )
+            logger.warning("Deep analysis failed (%s) — star-based defaults used for all", exc)
 
-    return await _analyze_sequential(reviews, client, progress_callback)
+    await progress_callback(len(reviews), len(reviews))
+
+    # Return in original order
+    return [base_map.get(r.id, _star_based_default(r)) for r in reviews]
 
 
 # ---------------------------------------------------------------------------
-# Batch path (>=50 reviews)
+# Concurrent analysis (replaces batch API — faster, no polling loop)
 # ---------------------------------------------------------------------------
 
-async def _analyze_batch(
+async def _analyze_concurrent(
     reviews: list[RawReview],
     client: anthropic.AsyncAnthropic,
     progress_callback: Callable[[int, int], Awaitable[None]],
+    total_reviews: int,
 ) -> list[ReviewAnalysis]:
-    batch_id = await _submit_batch(reviews, client)
-    return await _poll_batch_until_done(batch_id, reviews, client, len(reviews), progress_callback)
-
-
-async def _submit_batch(
-    reviews: list[RawReview],
-    client: anthropic.AsyncAnthropic,
-) -> str:
-    requests = [
-        {
-            "custom_id": review.id,
-            "params": {
-                "model": MODEL,
-                "max_tokens": 700,
-                "system": [
-                    {
-                        "type": "text",
-                        "text": SYSTEM_PROMPT,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": _build_review_message(review),
-                    }
-                ],
-            },
-        }
-        for review in reviews
-    ]
-
-    batch = await client.beta.messages.batches.create(requests=requests)
-    return batch.id
-
-
-async def _poll_batch_until_done(
-    batch_id: str,
-    reviews: list[RawReview],
-    client: anthropic.AsyncAnthropic,
-    total: int,
-    progress_callback: Callable[[int, int], Awaitable[None]],
-) -> list[ReviewAnalysis]:
-    tick = 0
-    while True:
-        batch = await client.beta.messages.batches.retrieve(batch_id)
-
-        counts = batch.request_counts
-        done_count = counts.succeeded + counts.errored + counts.canceled
-        await progress_callback(done_count, total)
-
-        if batch.processing_status == "ended":
-            break
-
-        tick += 1
-        # Keep-alive log every 30s
-        if tick % 6 == 0:
-            logger.info("Batch %s still processing… %d/%d done", batch_id, done_count, total)
-        await asyncio.sleep(BATCH_POLL_INTERVAL)
-
-    # Build a review_id → review lookup for star-rating override
-    review_map = {r.id: r for r in reviews}
-
-    # Collect results
+    """
+    Run CONCURRENCY Claude calls in parallel, chunked.
+    150 reviews at 15 concurrent = 10 chunks ≈ 20 seconds.
+    progress_callback reports against total_reviews (full dataset size).
+    """
     results: list[ReviewAnalysis] = []
-    async for result in await client.beta.messages.batches.results(batch_id):
-        review = review_map.get(result.custom_id)
-        if result.result.type == "succeeded":
-            raw_json = result.result.message.content[0].text
-            analysis = _parse_analysis_result(result.custom_id, raw_json)
-            if review:
-                analysis = _apply_star_override(review, analysis)
-        else:
-            logger.warning("Batch result failed for %s, using star-based default", result.custom_id)
-            analysis = _star_based_default(review) if review else _neutral_default(result.custom_id)
-        results.append(analysis)
+    done = 0
 
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Sequential path (<50 reviews)
-# ---------------------------------------------------------------------------
-
-async def _analyze_sequential(
-    reviews: list[RawReview],
-    client: anthropic.AsyncAnthropic,
-    progress_callback: Callable[[int, int], Awaitable[None]],
-) -> list[ReviewAnalysis]:
-    results: list[ReviewAnalysis] = []
-    total = len(reviews)
-
-    for i in range(0, total, SEQUENTIAL_CHUNK):
-        chunk = reviews[i : i + SEQUENTIAL_CHUNK]
+    for i in range(0, len(reviews), CONCURRENCY):
+        chunk = reviews[i : i + CONCURRENCY]
         chunk_results = await asyncio.gather(
-            *[_analyze_single(review, client) for review in chunk]
+            *[_analyze_single(r, client) for r in chunk],
+            return_exceptions=False,
         )
         results.extend(chunk_results)
-        await progress_callback(len(results), total)
-        await asyncio.sleep(0.5)  # brief pause between chunks
+        done += len(chunk)
+        await progress_callback(done, len(reviews))
+        logger.info("Deep analysis: %d/%d reviews done", done, len(reviews))
 
     return results
 
@@ -381,6 +349,138 @@ def _star_based_default(review: RawReview) -> ReviewAnalysis:
         cro_insights=CROInsights(friction_points=[], improvement_opportunities=[]),
         audit_flags=AuditFlags(high_priority_issue=rating <= 2, issue_category="other"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Global brand synthesis (one call, holistic CRO insights)
+# ---------------------------------------------------------------------------
+
+SYNTHESIS_MODEL = "claude-haiku-4-5-20251001"
+
+async def synthesize_brand_insights(
+    reviews: list[RawReview],
+    analyses: list[ReviewAnalysis],
+) -> BrandSynthesis:
+    """
+    Makes ONE Claude call across all reviews to produce holistic CRO insights:
+    top themes, friction points, improvement opportunities, key insights.
+
+    This fixes the "None detected" problem — per-review analysis returns empty
+    friction arrays for 4-5 star reviews. The synthesis sees the full picture.
+    """
+    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    # Build review_id → analysis map
+    analysis_map = {a.review_id: a for a in analyses}
+
+    # Separate by sentiment for focused synthesis
+    negative_reviews = [
+        r for r in reviews
+        if r.rating <= 2 or (
+            analysis_map.get(r.id) and
+            analysis_map[r.id].sentiment.overall == "negative"
+        )
+    ]
+    neutral_reviews  = [r for r in reviews if r.rating == 3]
+    positive_reviews = [r for r in reviews if r.rating >= 4]
+
+    # Build the review digest — all negatives + sample of others
+    def _fmt(r: RawReview) -> str:
+        title = f" | Title: {r.title}" if r.title else ""
+        text  = (r.text or "").strip()[:300]
+        return f"[{r.rating}★]{title}\n{text}"
+
+    import random
+    random.seed(42)
+
+    neg_block  = "\n\n".join(_fmt(r) for r in negative_reviews[:60])
+    neu_block  = "\n\n".join(_fmt(r) for r in neutral_reviews[:20])
+    pos_sample = random.sample(positive_reviews, min(40, len(positive_reviews)))
+    pos_block  = "\n\n".join(_fmt(r) for r in pos_sample)
+
+    total      = len(reviews)
+    avg_rating = round(sum(r.rating for r in reviews) / total, 2) if total else 0
+    pos_count  = sum(1 for a in analyses if a.sentiment.overall == "positive")
+    neg_count  = sum(1 for a in analyses if a.sentiment.overall == "negative")
+
+    prompt = f"""You are a senior CRO analyst. Analyze these Trustpilot reviews for a brand and produce actionable CRO insights.
+
+=== STATS ===
+Total reviews analyzed: {total}
+Average rating: {avg_rating}/5
+Positive: {round(pos_count/total*100,1) if total else 0}% | Negative: {round(neg_count/total*100,1) if total else 0}%
+
+=== NEGATIVE REVIEWS (most important for friction analysis) ===
+{neg_block or "(none)"}
+
+=== NEUTRAL REVIEWS ===
+{neu_block or "(none)"}
+
+=== SAMPLE OF POSITIVE REVIEWS ===
+{pos_block or "(none)"}
+
+Return a JSON object with exactly this structure:
+{{
+  "top_themes": [
+    {{"title": "short theme name", "description": "1-2 sentence explanation of what customers say", "mentions": <integer>}}
+  ],
+  "friction_points": [
+    {{"title": "specific friction label", "description": "what goes wrong and why it hurts conversions", "mentions": <integer>}}
+  ],
+  "improvement_opportunities": [
+    {{"title": "actionable fix", "description": "what to change and expected CRO impact", "mentions": <integer>}}
+  ],
+  "key_insights": ["insight 1", "insight 2", "insight 3"]
+}}
+
+Rules:
+- top_themes: 5 items — what customers mention most (positive AND negative)
+- friction_points: up to 5 items — ONLY if real friction exists in the reviews. If the brand is overwhelmingly positive, list real minor friction or leave as empty array []. Never invent friction.
+- improvement_opportunities: up to 5 actionable items tied to actual review evidence
+- key_insights: exactly 3 high-level CRO observations about this brand's customer experience
+- mentions: realistic estimate based on review count
+- Be specific and evidence-based. Do not invent issues not present in the reviews."""
+
+    try:
+        response = await client.messages.create(
+            model=SYNTHESIS_MODEL,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text.strip()
+        # Strip markdown fences if present
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        data = json.loads(raw)
+
+        def _parse_insights(items: list) -> list[BrandInsight]:
+            result = []
+            for item in (items or []):
+                if isinstance(item, dict) and item.get("title"):
+                    result.append(BrandInsight(
+                        title=item["title"],
+                        description=item.get("description", ""),
+                        mentions=int(item.get("mentions", 0)),
+                    ))
+            return result
+
+        return BrandSynthesis(
+            top_themes=_parse_insights(data.get("top_themes", [])),
+            friction_points=_parse_insights(data.get("friction_points", [])),
+            improvement_opportunities=_parse_insights(data.get("improvement_opportunities", [])),
+            key_insights=[str(i) for i in data.get("key_insights", []) if i],
+        )
+
+    except Exception as exc:
+        logger.warning("Brand synthesis failed: %s", exc)
+        return BrandSynthesis(
+            top_themes=[], friction_points=[],
+            improvement_opportunities=[], key_insights=[],
+        )
 
 
 def _apply_star_override(review: RawReview, analysis: ReviewAnalysis) -> ReviewAnalysis:
