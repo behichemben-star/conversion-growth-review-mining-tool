@@ -1,40 +1,41 @@
 /* ── Reset ─────────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-/* ── Design Tokens (mapped from palette.css) ────────────────────────────── */
+/* ── Design Tokens ──────────────────────────────────────────────────────── */
+/* Values sourced from palette.css — hardcoded for reliability              */
 :root {
   /* Backgrounds */
-  --bg:           var(--black-500);        /* #141419 */
-  --surface:      var(--black-100);        /* #111827 */
-  --surface2:     var(--black-200);        /* #1f2937 */
-  --surface3:     var(--black-400);        /* #2a2a2a */
-  --border:       var(--darkslategray-300);/* rgba(55,65,81,.3) */
-  --border2:      var(--darkslategray-400);/* rgba(55,65,81,.5) */
+  --bg:           #141419;   /* palette: --black-500   */
+  --surface:      #111827;   /* palette: --black-100   */
+  --surface2:     #1f2937;   /* palette: --black-200   */
+  --surface3:     #2a2a2a;   /* palette: --black-400   */
+  --border:       rgba(55, 65, 81, 0.35);
+  --border2:      rgba(55, 65, 81, 0.55);
 
   /* Text */
-  --text:         var(--gainsboro-100);    /* #e5e7eb */
-  --text-2:       var(--darkgray-100);     /* #9ca3af */
-  --text-muted:   var(--dimgray-100);      /* #4b5563 */
+  --text:         #e5e7eb;   /* palette: --gainsboro-100 */
+  --text-2:       #9ca3af;   /* palette: --darkgray-100  */
+  --text-muted:   #6b7280;   /* palette: --slategray-100 */
 
   /* Accent — cyan */
-  --accent:       var(--darkturquoise-100);/* #22d3ee */
-  --accent-2:     var(--skyblue-100);      /* #06b6d4 */
-  --accent-dim:   var(--skyblue-300);      /* rgba(6,182,212,.1) */
+  --accent:       #22d3ee;   /* palette: --darkturquoise-100 */
+  --accent-2:     #06b6d4;   /* palette: --skyblue-100       */
+  --accent-dim:   rgba(6, 182, 212, 0.12);
   --accent-glow:  rgba(34, 211, 238, 0.05);
 
   /* Sentiment */
-  --positive:     var(--mediumseagreen-200);  /* #10b981 */
-  --pos-bg:       var(--mediumseagreen-800);  /* rgba(16,185,129,.1) */
-  --pos-bd:       var(--mediumseagreen-300);  /* rgba(16,185,129,.3) */
+  --positive:     #10b981;   /* palette: --mediumseagreen-200 */
+  --pos-bg:       rgba(16, 185, 129, 0.1);
+  --pos-bd:       rgba(16, 185, 129, 0.3);
 
-  --negative:     var(--crimson-200);         /* #f43f5e */
-  --neg-bg:       var(--crimson-600);         /* rgba(244,63,94,.1) */
-  --neg-bd:       var(--crimson-700);         /* rgba(239,68,68,.4) */
+  --negative:     #f43f5e;   /* palette: --crimson-200 */
+  --neg-bg:       rgba(244, 63, 94, 0.1);
+  --neg-bd:       rgba(239, 68, 68, 0.4);
 
-  --neutral:      var(--slategray-100);       /* #6b7280 */
-  --neu-bg:       var(--darkslategray-300);   /* rgba(55,65,81,.3) */
+  --neutral:      #6b7280;   /* palette: --slategray-100 */
+  --neu-bg:       rgba(55, 65, 81, 0.3);
 
-  --star:         var(--darkorange-100);      /* #f97316 */
+  --star:         #f97316;   /* palette: --darkorange-100 */
 
   /* Shape */
   --radius:       12px;
@@ -42,10 +43,10 @@
   --radius-xs:    5px;
 
   /* Shadows */
-  --shadow:       0 8px 40px var(--black-700);
+  --shadow:       0 8px 40px rgba(0, 0, 0, 0.55);
   --shadow-sm:    0 2px 12px rgba(0, 0, 0, 0.35);
 
-  /* Typography — Inter replaces DM Sans for crisper Helvetica-style rendering */
+  /* Typography */
   --font-head:    'Syne', 'Inter', sans-serif;
   --font-body:    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   --font-mono:    'JetBrains Mono', 'Fira Code', monospace;
