@@ -16,6 +16,12 @@ build/
 # Scraped data (can be large, regenerated on demand)
 data/
 
+# Claude Code internals
+.claude/
+
+# Misc
+*.docx
+
 # OS
 .DS_Store
 Thumbs.db
